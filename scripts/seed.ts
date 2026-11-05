@@ -12,6 +12,7 @@ import {
   QuestionType,
   TeamMemberRole,
 } from "../app/db/schema";
+import { calculatePppPrice } from "../app/lib/ppp";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -167,8 +168,41 @@ async function seed() {
     .returning()
     .all();
 
+  // Extra students so instructor analytics have enough data to read by hand:
+  // individual buyers (several PPP-discounted), a second team buyer, and two
+  // students who join through that team's coupons.
+  const extraStudents: { name: string; createdDaysAgo: number }[] = [
+    { name: "Ava Patel", createdDaysAgo: 88 },
+    { name: "Lucas Silva", createdDaysAgo: 75 },
+    { name: "Mia Okafor", createdDaysAgo: 14 },
+    { name: "Ethan Brooks", createdDaysAgo: 90 },
+    { name: "Chloe Nguyen", createdDaysAgo: 10 },
+    { name: "Daniel Weber", createdDaysAgo: 70 },
+    { name: "Isabella Rossi", createdDaysAgo: 5 },
+    { name: "Priya Sharma", createdDaysAgo: 20 },
+    { name: "Henry Clark", createdDaysAgo: 18 },
+    { name: "Grace Lee", createdDaysAgo: 12 },
+  ];
+
+  const [ava, lucas, mia, ethan, chloe, daniel, isabella, priya, henry, grace] =
+    db
+      .insert(schema.users)
+      .values(
+        extraStudents.map(({ name, createdDaysAgo }) => ({
+          name,
+          email: `${name.toLowerCase().replace(" ", ".")}@student.dev`,
+          role: UserRole.Student,
+          avatarUrl: `https://api.dicebear.com/9.x/avataaars/svg?seed=${name.split(" ")[0].toLowerCase()}`,
+          createdAt: daysAgo(createdDaysAgo),
+        }))
+      )
+      .returning()
+      .all();
+
+  const studentCount = students.length + 1 /* bossy */ + extraStudents.length;
+
   console.log(
-    `Created ${1 + 2 + students.length + 1} users (1 admin, 2 instructors, ${students.length + 1} students).`
+    `Created ${1 + 2 + studentCount} users (1 admin, 2 instructors, ${studentCount} students).`
   );
 
   // ─── Categories ───
@@ -1403,7 +1437,41 @@ You've completed the Building REST APIs course. You now have the skills to build
     ])
     .run();
 
-  console.log("Created 7 enrollments.");
+  // Extra enrollments spread across the last ~90 days so every course has
+  // enrollments both inside and outside the 30-day analytics window.
+  // - Ava: course 1, finished every lesson
+  // - Lucas: course 2, stalled early, never passed the quiz
+  // - Mia: course 1, recent, a few lessons in
+  // - Ethan: course 2, finished every lesson
+  // - Chloe: course 2, recent, a few lessons in
+  // - Daniel: course 1, stalled about halfway
+  // - Isabella: course 1, enrolled a few days ago, just started
+  // - Henry, Grace: course 1 via Priya's team coupons (see Teams below)
+  db.insert(schema.enrollments)
+    .values([
+      {
+        userId: ava.id,
+        courseId: course1.id,
+        enrolledAt: daysAgo(85),
+        completedAt: daysAgo(62),
+      },
+      { userId: lucas.id, courseId: course2.id, enrolledAt: daysAgo(72) },
+      { userId: mia.id, courseId: course1.id, enrolledAt: daysAgo(12) },
+      {
+        userId: ethan.id,
+        courseId: course2.id,
+        enrolledAt: daysAgo(70),
+        completedAt: daysAgo(50),
+      },
+      { userId: chloe.id, courseId: course2.id, enrolledAt: daysAgo(8) },
+      { userId: daniel.id, courseId: course1.id, enrolledAt: daysAgo(65) },
+      { userId: isabella.id, courseId: course1.id, enrolledAt: daysAgo(3) },
+      { userId: henry.id, courseId: course1.id, enrolledAt: daysAgo(16) },
+      { userId: grace.id, courseId: course1.id, enrolledAt: daysAgo(10) },
+    ])
+    .run();
+
+  console.log("Created 16 enrollments.");
 
   // ─── Course Ratings ───
   // Star ratings from enrolled students only. Not everyone rates.
@@ -1654,6 +1722,39 @@ You've completed the Building REST APIs course. You now have the skills to build
   markComplete(students[4].id, course1LessonIds[0], 12);
   markInProgress(students[4].id, course1LessonIds[1]);
 
+  // Completes the first `count` lessons in order, spreading completion dates
+  // evenly from `fromDaysAgo` towards `toDaysAgo`, then leaves the next lesson
+  // in progress if the student stopped partway.
+  function completeLessons(
+    userId: number,
+    lessonIds: number[],
+    count: number,
+    fromDaysAgo: number,
+    toDaysAgo: number
+  ) {
+    for (let i = 0; i < count; i++) {
+      const step = count > 1 ? i / (count - 1) : 0;
+      markComplete(
+        userId,
+        lessonIds[i],
+        Math.round(fromDaysAgo - step * (fromDaysAgo - toDaysAgo))
+      );
+    }
+    if (count < lessonIds.length) {
+      markInProgress(userId, lessonIds[count]);
+    }
+  }
+
+  completeLessons(ava.id, course1LessonIds, course1LessonIds.length, 84, 62);
+  completeLessons(lucas.id, course2LessonIds, 5, 71, 60);
+  completeLessons(mia.id, course1LessonIds, 4, 11, 7);
+  completeLessons(ethan.id, course2LessonIds, course2LessonIds.length, 69, 50);
+  completeLessons(chloe.id, course2LessonIds, 3, 7, 4);
+  completeLessons(daniel.id, course1LessonIds, 9, 64, 52);
+  markInProgress(isabella.id, course1LessonIds[0]);
+  completeLessons(henry.id, course1LessonIds, 6, 15, 9);
+  completeLessons(grace.id, course1LessonIds, 2, 9, 6);
+
   console.log("Created lesson progress records.");
 
   // ─── Quiz Attempts ───
@@ -1736,6 +1837,35 @@ You've completed the Building REST APIs course. You now have the skills to build
 
   // Sophia — failed quiz 1 (1/3 correct, hasn't retaken yet)
   recordQuizAttempt(students[4].id, quiz1.id, quiz1OptionIds, [1], 10);
+
+  // Ava — passed quiz 1 first time; failed quiz 2 (1/2), then passed (2/2)
+  recordQuizAttempt(ava.id, quiz1.id, quiz1OptionIds, [0, 1, 2], 82);
+  recordQuizAttempt(ava.id, quiz2.id, quiz2OptionIds, [0], 77);
+  recordQuizAttempt(ava.id, quiz2.id, quiz2OptionIds, [0, 1], 76);
+
+  // Daniel — failed quiz 1 (2/3), passed on retry; failed quiz 2, never retook it
+  recordQuizAttempt(daniel.id, quiz1.id, quiz1OptionIds, [0, 1], 62);
+  recordQuizAttempt(daniel.id, quiz1.id, quiz1OptionIds, [0, 1, 2], 61);
+  recordQuizAttempt(daniel.id, quiz2.id, quiz2OptionIds, [1], 52);
+
+  // Mia — three attempts at quiz 1: fail, fail, pass
+  recordQuizAttempt(mia.id, quiz1.id, quiz1OptionIds, [2], 9);
+  recordQuizAttempt(mia.id, quiz1.id, quiz1OptionIds, [0, 2], 8);
+  recordQuizAttempt(mia.id, quiz1.id, quiz1OptionIds, [0, 1, 2], 8);
+
+  // Henry — passed quiz 1 first time
+  recordQuizAttempt(henry.id, quiz1.id, quiz1OptionIds, [0, 1, 2], 13);
+
+  // Ethan — passed quiz 3 first time
+  recordQuizAttempt(ethan.id, quiz3.id, quiz3OptionIds, [0, 1, 2], 67);
+
+  // Lucas — failed quiz 3 twice and never passed it
+  recordQuizAttempt(lucas.id, quiz3.id, quiz3OptionIds, [0], 68);
+  recordQuizAttempt(lucas.id, quiz3.id, quiz3OptionIds, [1], 60);
+
+  // Chloe — failed quiz 3 (2/3), passed on retry
+  recordQuizAttempt(chloe.id, quiz3.id, quiz3OptionIds, [0, 1], 5);
+  recordQuizAttempt(chloe.id, quiz3.id, quiz3OptionIds, [0, 1, 2], 5);
 
   console.log("Created quiz attempts and answers.");
 
@@ -1834,14 +1964,44 @@ You've completed the Building REST APIs course. You now have the skills to build
     })
     .run();
 
-  console.log("Created 5 individual purchases.");
+  // More individual purchases across ~90 days. Each pays the PPP price for
+  // its country — full price for US/DE, discounted for the rest.
+  const extraPurchases: {
+    userId: number;
+    course: typeof course1;
+    country: string;
+    purchasedDaysAgo: number;
+  }[] = [
+    { userId: ava.id, course: course1, country: "IN", purchasedDaysAgo: 85 },
+    { userId: lucas.id, course: course2, country: "BR", purchasedDaysAgo: 72 },
+    { userId: mia.id, course: course1, country: "NG", purchasedDaysAgo: 12 },
+    { userId: ethan.id, course: course2, country: "US", purchasedDaysAgo: 70 },
+    { userId: chloe.id, course: course2, country: "VN", purchasedDaysAgo: 8 },
+    { userId: daniel.id, course: course1, country: "DE", purchasedDaysAgo: 65 },
+    { userId: isabella.id, course: course1, country: "MX", purchasedDaysAgo: 3 },
+  ];
+
+  db.insert(schema.purchases)
+    .values(
+      extraPurchases.map(({ userId, course, country, purchasedDaysAgo }) => ({
+        userId,
+        courseId: course.id,
+        amountPaid: calculatePppPrice(course.price, country),
+        country,
+        createdAt: daysAgo(purchasedDaysAgo),
+      }))
+    )
+    .run();
+
+  console.log("Created 12 individual purchases.");
 
   // ─── Teams, Team Members, and Coupons ───
-  // Bossy McBossface bought 5 team seats for course 2; Olivia and Liam redeemed coupons
+  // Bossy McBossface bought 5 team seats for course 2 just outside the 30-day
+  // window; Olivia and Liam redeemed coupons
 
   const [team1] = db
     .insert(schema.teams)
-    .values({ createdAt: daysAgo(30) })
+    .values({ createdAt: daysAgo(32) })
     .returning()
     .all();
 
@@ -1850,7 +2010,7 @@ You've completed the Building REST APIs course. You now have the skills to build
       teamId: team1.id,
       userId: bossy.id,
       role: TeamMemberRole.Admin,
-      createdAt: daysAgo(30),
+      createdAt: daysAgo(32),
     })
     .run();
 
@@ -1862,7 +2022,7 @@ You've completed the Building REST APIs course. You now have the skills to build
       courseId: course2.id,
       amountPaid: 5999 * 5,
       country: "US",
-      createdAt: daysAgo(30),
+      createdAt: daysAgo(32),
     })
     .returning()
     .all();
@@ -1884,7 +2044,7 @@ You've completed the Building REST APIs course. You now have the skills to build
         courseId: course2.id,
         code,
         purchaseId: teamPurchase.id,
-        createdAt: daysAgo(30),
+        createdAt: daysAgo(32),
       }))
     )
     .returning()
@@ -1913,18 +2073,84 @@ You've completed the Building REST APIs course. You now have the skills to build
     `Created 1 team with Bossy McBossface as admin, 1 team purchase, and ${seededCoupons.length} coupons (2 redeemed, 3 available).`
   );
 
+  // Priya Sharma bought 3 team seats for course 1 inside the 30-day window;
+  // Henry and Grace redeemed coupons, one seat is still unused.
+  const [team2] = db
+    .insert(schema.teams)
+    .values({ createdAt: daysAgo(18) })
+    .returning()
+    .all();
+
+  db.insert(schema.teamMembers)
+    .values({
+      teamId: team2.id,
+      userId: priya.id,
+      role: TeamMemberRole.Admin,
+      createdAt: daysAgo(18),
+    })
+    .run();
+
+  const [teamPurchase2] = db
+    .insert(schema.purchases)
+    .values({
+      userId: priya.id,
+      courseId: course1.id,
+      amountPaid: course1.price * 3,
+      country: "GB",
+      createdAt: daysAgo(18),
+    })
+    .returning()
+    .all();
+
+  // Henry and Grace have course 1 enrollments from the enrollments section above
+  db.insert(schema.coupons)
+    .values([
+      {
+        teamId: team2.id,
+        courseId: course1.id,
+        code: "TEAM-TS-P1Q2R3",
+        purchaseId: teamPurchase2.id,
+        redeemedByUserId: henry.id,
+        redeemedAt: daysAgo(16),
+        createdAt: daysAgo(18),
+      },
+      {
+        teamId: team2.id,
+        courseId: course1.id,
+        code: "TEAM-TS-S4T5U6",
+        purchaseId: teamPurchase2.id,
+        redeemedByUserId: grace.id,
+        redeemedAt: daysAgo(10),
+        createdAt: daysAgo(18),
+      },
+      {
+        teamId: team2.id,
+        courseId: course1.id,
+        code: "TEAM-TS-V7W8X9",
+        purchaseId: teamPurchase2.id,
+        createdAt: daysAgo(18),
+      },
+    ])
+    .run();
+
+  console.log(
+    "Created 1 team with Priya Sharma as admin, 1 team purchase, and 3 coupons (2 redeemed, 1 available)."
+  );
+
   console.log("\n✓ Seed complete!");
-  console.log("  Users: 9 (1 admin, 2 instructors, 6 students)");
+  console.log(
+    `  Users: ${1 + 2 + studentCount} (1 admin, 2 instructors, ${studentCount} students)`
+  );
   console.log("  Categories: 5");
   console.log(
     `  Courses: 2 (${course1LessonIds.length} + ${course2LessonIds.length} lessons)`
   );
   console.log("  Quizzes: 3");
-  console.log("  Enrollments: 7");
+  console.log("  Enrollments: 16");
   console.log("  Course ratings: 6");
   console.log("  Lesson comments: 15 (4 questions awaiting an answer)");
-  console.log("  Purchases: 6 (5 individual + 1 team)");
-  console.log("  Teams: 1 (with 5 coupons)");
+  console.log("  Purchases: 14 (12 individual + 2 team)");
+  console.log("  Teams: 2 (with 8 coupons)");
 }
 
 seed().catch(console.error);
